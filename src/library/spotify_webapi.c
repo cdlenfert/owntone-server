@@ -1990,26 +1990,47 @@ scan_saved_audiobooks(enum spotify_request_type request_type)
   return ret;
 }
 
+struct saved_playlist_tracks_param {
+  struct playlist_info *pli;
+  bool playlist_added;
+};
+
 /*
  * Add a saved playlist's tracks to the library
  */
 static int
 saved_playlist_tracks_add(json_object *item, int index, int total, enum spotify_request_type request_type, void *arg)
 {
+  struct saved_playlist_tracks_param *param;
   struct spotify_track track;
   struct spotify_album album;
   json_object *jsontrack;
   json_object *jsonalbum;
   struct playlist_info *pli;
   int dir_id;
+  int pl_id;
   int ret;
 
-  pli = arg;
+  param = arg;
+  pli = param->pli;
 
   if (!(item && json_object_object_get_ex(item, "track", &jsontrack)))
     {
       DPRINTF(E_LOG, L_SPOTIFY, "Unexpected JSON: missing 'track' in JSON object at index %d\n", index);
       return -1;
+    }
+
+  if (!param->playlist_added)
+    {
+      pl_id = playlist_add_or_update(pli);
+      if (pl_id <= 0)
+        {
+          DPRINTF(E_LOG, L_SPOTIFY, "Error adding playlist: '%s' (%s) \n", pli->title, pli->path);
+          return -1;
+        }
+
+      pli->id = pl_id;
+      param->playlist_added = true;
     }
 
   parse_metadata_track(jsontrack, &track, 0);
@@ -2044,9 +2065,10 @@ saved_playlist_tracks_add(json_object *item, int index, int total, enum spotify_
 static int
 scan_playlist_tracks(const char *playlist_tracks_endpoint_uri, struct playlist_info *pli, enum spotify_request_type request_type)
 {
+  struct saved_playlist_tracks_param param = { .pli = pli };
   int ret;
 
-  ret = request_pagingobject_endpoint(playlist_tracks_endpoint_uri, saved_playlist_tracks_add, transaction_start, transaction_end, true, request_type, pli);
+  ret = request_pagingobject_endpoint(playlist_tracks_endpoint_uri, saved_playlist_tracks_add, transaction_start, transaction_end, true, request_type, &param);
 
   return ret;
 }
@@ -2078,14 +2100,13 @@ saved_playlist_add(json_object *item, int index, int total, enum spotify_request
 {
   struct spotify_playlist playlist;
   struct playlist_info pli;
-  int pl_id;
 
   // Map playlist information
   parse_metadata_playlist(item, &playlist);
 
   DPRINTF(E_DBG, L_SPOTIFY, "Got playlist: '%s' with %d tracks (%s) \n", playlist.name, playlist.tracks_count, playlist.uri);
 
-  if (!playlist.uri || !playlist.name || playlist.tracks_count == 0)
+  if (!playlist.uri || !playlist.name || !playlist.tracks_href)
     {
       DPRINTF(E_INFO, L_SPOTIFY, "Ignoring playlist '%s' with %d tracks (%s)\n", playlist.name, playlist.tracks_count, playlist.uri);
       return 0; // Ignore
@@ -2093,13 +2114,7 @@ saved_playlist_add(json_object *item, int index, int total, enum spotify_request
 
   map_playlist_to_pli(&pli, &playlist);
 
-  pl_id = playlist_add_or_update(&pli);
-  pli.id = pl_id;
-
-  if (pl_id > 0)
-    scan_playlist_tracks(playlist.tracks_href, &pli, request_type);
-  else
-    DPRINTF(E_LOG, L_SPOTIFY, "Error adding playlist: '%s' (%s) \n", playlist.name, playlist.uri);
+  scan_playlist_tracks(playlist.tracks_href, &pli, request_type);
 
   free_pli(&pli, 1);
 
